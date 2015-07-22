@@ -7,7 +7,6 @@ con.onopen = function () {
 con.onerror = function(err) {
     console.log("Websocket error: " + JSON.stringify(err));
 };
-
 con.onmessage = function (e) {
     console.log("Server:"+ e.data);
 };
