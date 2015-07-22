@@ -153,14 +153,99 @@ server.on('error', function (e) {
  *
  * allowHalfOpen这参数和server结束时发送end事件的表现有关。（...）
  *
+ * ~~~~~~一些重要方法~~~~~
  *
  *
+ * 开启连接
+ * socket.connect(port[,host][,connectListener]);
+ * socket.connect(path[,connectListener]);
+ * 和上面createServer一样饿。但path那个吧，还是unix里面更常用。
+ * 连接上了会触发connect事件，异常了就触发error事件。
  *
  *
+ * 缓冲区大小
+ * socket.bufferSize
+ * 缓冲区。网络慢嘛，缓冲。可以检测大小之后进行限流，使用resume(),pause().
+ *
+ * 设置编码集
+ * socket.setEncoding([encoding]);
+ * 默认utf8咯。参看stream.setEncoding()
+ *
+ * 写数据
+ * socket.write(data [,encoding][, callback])
+ * 第二个参数如果string就默认为utf8.
+ * 写进了kernel buffer就返回true，否则由于内存不足被阻塞了没写完都返回false。当真正buffer发送走数据的时候触发drain事件。
+ * callback是data真正被写入的时候被触发的，是异步方法。
+ *
+ * 单方面结束
+ * socket.end([data][,encoding])
+ * 发一个FIN包。在这之前可能还发送点data。
+ *
+ * socket.destory();
+ * 保证之前没有活的了。一般在error发生的时候才会调用呢。
+ *
+ * socket.pause();
+ * 暂停读取数据，就是说调用pause后就不会触发data事件撩。限制上传很有用。
+ *
+ * socket.resume();
+ * pause()逆操作，没啥好说。
+ *
+ * 设置超时
+ * socket.setTimeout(timeout[,callback])
+ * 本来socket无所谓超时的，但为了节约资源so。总之时间到了会触发一个timeout事件但必须手动调用end()或者destroy()。timeout=0的话，existing idle timeout会被停用（不懂？？）
+ *
+ * 禁止Nagle算法。
+ * socket.setNoDelay([noDelay]);
+ * 默认TCP开启了Nagle算法，会在buffer里攒着小包不发，设为true就直接socket.write。
+ *
+ * 保持长连接（？）
+ * socket.setKeepAlive([enable][,initalDelay])
+ * 是否开启长连接，默认不开启的。
+ *
+ * socket.unref()/socket.ref()
+ * 。。。
+ *
+ * socket.remoteAddress/socket.remotePort/socket.localAddress/socket.localPort
+ * 客户端、服务器的连接IP地址、端口/21 or 80
+ *
+ * socket.bytesRead/byteWritten
+ * 已经接收到/发送的字节数
  *
  *
+ * *********相关事件***********
  *
+ * lookup:
+ * dns 解析完成但还没连接的时刻发射~
  *
+ * connect:
+ * 连接成功时发射~
  *
+ * data:
+ * 接收到数据时候发射~数据有可能是Buffer或者String,用socket.setEncoding进行编码，对于天朝人可能还需要iconv哦呵呵。参考Readable Stream获取更多哦
+ * 警告，当socket发射data事件，却发现data事件没有指定回调函数，数据就掉了！！自己看着办~~！
+ *
+ * end:
+ * socket时不时立即销毁全看allowHalfOpen参数，如果true就不主动end() (其实没看太懂
+ *
+ * timeout:
+ * 就通知一下闲了很久，要close()自己来。
+ *
+ * drain:
+ * 当write buffer又空了的时候发送。控制流量哦~
+ *
+ * error:
+ * 不解释
+ *
+ * close:
+ * had_error 标志有没有错误
  *
  */
+
+/**
+ *
+ * net.isIP(input)  0 代表非法输入，4代表ipv4, 6代表ipv6
+ * net.isIPv4(input)
+ * net.isIPv6(input)
+ *
+ */
+
