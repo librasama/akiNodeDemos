@@ -376,9 +376,143 @@ function OpenEvent(target){
     this.target = target;
 }
 
-function initAsServerClient(req, socket, upgradeHead, options){}
-function initAsClient(address, protocols, options){}
-function establishConnection(ReceiverClass, SenderClass, socket, upgradeHead){}
+/**
+ * 嘛，看起来hixie-76这个协议是基于binary实现的？？已经过时了……
+ * @param req
+ * @param socket
+ * @param upgradeHead
+ * @param options
+ */
+function initAsServerClient(req, socket, upgradeHead, options){
+    options = new Options({
+        protocolVersion:protocolVersion,
+        protocol:null,
+        extensions:{}
+    }).merge(options);
+
+    // expose state properties
+    this.protocol = options.value.protocol;
+    this.protocolVersion = options.value.protocolVersion;
+    this.extensions = options.value.extensions;
+    this.supports.binary = (this.protocolVersion !== 'hixie-76');
+    this.upgradeReq = req;
+    this.readyState = WebSocket.CONNECTING;
+    this._isServer = true;
+
+    // 开始连接
+    if(options.value.protocolVersion === 'hixie-76') {
+        establishConnection.call(this, ReceiverHixie, SenderHixie, socket, upgradeHead);
+    } else {
+        establishConnection.call(this, Receiver, Sender, socket, upgradeHead);
+    }
+}
+
+/***
+ *
+ * ！！！！！！！！！！重头戏！！！！！！！！
+ *
+ * @param address
+ * @param protocols
+ * @param options
+ */
+function initAsClient(address, protocols, options){
+
+
+}
+
+/**
+ * 嗷。打开连接，设置好sender receiver!!!!相应的回调函数！！！
+ * @param ReceiverClass
+ * @param SenderClass
+ * @param socket
+ * @param upgradeHead
+ */
+function establishConnection(ReceiverClass, SenderClass, socket, upgradeHead){
+    var ultron = this._ultron = new Ultron(socket);
+    this._socket = socket;
+
+    socket.setTimeout(0);
+    socket.setNoDelay(true);
+    var self = this;
+    this._receiver = new ReceiverClass(this.extensions);
+
+    ultron.on('end', cleanupWebSocketResources.bind(this));
+    ultron.on('close', cleanupWebSocketResources.bind(this));
+    ultron.on('error', cleanupWebSocketResources.bind(this));
+
+    // 保证upgradeHead 加入到了receiver
+    function firstHandler(data) {
+        if(self.readyState !== WebSocket.OPEN && self.readyState !== WebSocket.CLOSING) return;
+
+        if(upgradeHead && upgradeHead.length >0) {
+            self.bytesReceived += upgradeHead.length;
+            var head = upgradeHead;
+            upgradeHead = null;
+            self._receiver.add(head);
+        }
+        dataHandler = realHandler;
+
+        if(data) {
+            self.bytesReceived += data.length;
+            self._receiver.add(data);
+        }
+    }
+
+    function realHandler(data) {
+        if(data) self.bytesReceived += data.length;
+        self._receiver.add(data);
+    }
+    // 先给firstHandler 把头部加入，再用realHandler填充data
+    var dataHandler = firstHandler;
+
+    // 如果data随着http upgrade传递过来，就把它传递给receiver，下个tick才出发，因为caller还没来得及把handler传递给client
+    process.nextTick(firstHandler);
+
+    // 设置好_receiver的一些回调
+    self._receiver.ontext = function ontext(data, flags) {
+        flags = flags || {};
+        self.emit('message', data, flags);
+    };
+
+    self._receiver.onbinary = function onbinary(data, flags) {
+        flags = flags || {};
+
+        flags.binary = true;
+        self.emit('message', data, flags);
+    };
+
+    self._receiver.onping = function onping(data, flags) {
+        flags = flags || {};
+
+        self.pong(data, {mask:!self._isServer, binary:flags.binary === true}, true);
+        self.emit('ping', data, flags);
+    };
+
+    self._receiver.onpong = function onpong(data, flags) {
+        self.emit('pong', data, flags || {});
+    };
+
+    self._receiver.onclose = function onclose(data, flags) {
+        self._closeReceived = true;
+        self.close(code, data);
+    };
+
+    self._receiver.onerror = function onerror(data, flags) {
+        // 要是receiver报告一个HyBi的错误就关闭连接
+        self.close(typeof errorCode !== 'undefined' ? errorCode : 1002, '');
+        self.emit('error', reason, errorCode);
+    };
+
+    this._sender = new SenderClass(socket, this.extensions);
+    this._sender.on('error', function onerror(error) {
+        self.close(1002, ''); /// 1002什么鬼？？
+        self.emit('error', error);
+    });
+    this.readyState = WebSocket.OPEN;
+    this.emit('open');
+    ultron.on('data', dataHandler);
+}
+
 function startQueue(instance){
     instance._queue = instance._queue || [];
 }
@@ -476,11 +610,4 @@ function cleanupWebSocketResources(error){
     this.on('error', function onerror(){});
     delete this._queue;
 }
-
-
-
-
-
-
-
 
