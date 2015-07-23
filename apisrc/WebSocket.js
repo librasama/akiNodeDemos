@@ -410,14 +410,231 @@ function initAsServerClient(req, socket, upgradeHead, options){
 /***
  *
  * ！！！！！！！！！！重头戏！！！！！！！！
+ * 也米什么。
+ * 先校验options，然后按加密与否实例化 httpserver，把options传进去。对于事件一顿校验是否关闭状态，协议，扩展。
+ * 具体upgrade事件处理函数转交给establishConnection了....调用req，完。
  *
  * @param address
  * @param protocols
  * @param options
  */
 function initAsClient(address, protocols, options){
+    options = new Options({
+        origin:null,
+        protocolVersion:protocolVersion,
+        host:null,
+        headers:null,
+        protocol:protocols.join(','),
+        agent:null,
+
+        // ssl-related options
+        pfx:null,
+        key:null,
+        passphrase:null,
+        cert:null,
+        ca:null,
+        ciphers:null,
+        rejectUnauthorized:null,
+        perMessageDeflate:true
+    }).merge(options);
+
+    if(options.value.protocolVersion !== 8 && options.value.protocolVersion !== 13) {
+        throw new Error('unsupported protocol version');
+    }
+
+    var serverUrl = url.parse(address);
+    var isUnixSocket = serverUrl.protocol === 'ws+unix:';
+    if(!serverUrl.host && !isUnixSocket) throw new Error('invalid url');
+    var isSecure = serverUrl.prototype === 'wss:' || serverUrl.protocol === 'https:';
+    var httpObj = isSecure?https:http;
+    var port = serverUrl.port || (isSecure ? 443 : 80);//默认端口啦
+    var auth = serverUrl.auth;
 
 
+    // 扩展协议（？？？）
+    var extensionsOffer = {};
+    var perMessageDeflate;
+    // PerMessageDeflate 这个就是用来压缩数据的~~！和一些其他的参数设置...
+    if(options.value.perMessageDeflate) {
+        perMessageDeflate = new PerMessageDeflate(typeof options.value.perMessageDeflate !== true ? options.value.perMessageDeflate : {}, false);
+        extensionsOffer[PerMessageDeflate.extensionName] = perMessageDeflate.offer();
+    }
+
+    // 暴露状态
+    this._isServer = false;
+    this.url = address;
+    this.protocolVersion = options.value.protocolVersion;
+    this.supports.binary = (this.protocolVersion !== 'hixie-76');
+
+    // 开始握手
+    // Buffer.toString('encoding')
+    var key = new Buffer(options.value.protocolVersion + '-'+ Date.now()).toString('base64');
+    // 258EAFA5-E914-47DA-95CA-C5AB0DC85B11 这个串是固定的！！
+    var shasum = crypto.createHash('sha1');
+    shasum.update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11');
+    var expectedServerKey = shasum.digest('base64');  // base64摘要
+
+    var agent = options.value.agent;
+
+    var headerHost = serverUrl.hostname;
+    // 为 host header加上固定端口号。当指定了url而且不是默认的(http的80,https的443)
+    if(serverUrl.port) {
+        if((isSecure && (port !== 443)) || (!isSecure && (port !== 80))) {
+            headerHost = headerHost + ':' + port;
+        }
+    }
+
+    var requestOptions = {
+        port:port,
+        host:serverUrl.hostname,
+        headers: {
+            'Connection':'Upgrade',
+            'Upgrade':'websocket',
+            'Host': headerHost,
+            'Sec-WebSocket-Version':options.value.protocolVersion,
+            'Sec-WebSocket-Key':key
+        }
+    };
+
+    // 如果有基本验证
+    if(auth) {
+        requestOptions.headers.Authorization = 'Basic ' + new Buffer(auth).toString('base64');
+    }
+
+    if(options.value.protocol) {
+        requestOptions.headers['Sec-WebSocket-Protocol'] = options.value.protocol;
+    }
+
+    if(options.value.host) {
+        requestOptions.headers.Host = options.value.host;
+    }
+
+    if(options.value.headers) {
+        for(var header in options.value.headers) {
+            if(options.value.headers.hasOwnProperty(header)) {
+                requestOptions.headers[header] = options.value.headers[header];
+            }
+        }
+    }
+
+    if(Object.keys(extensionsOffer).length) {
+        requestOptions.headers['Sec-WebSocket-Extensions'] = Extensions.format(extensionsOffer);
+    }
+
+    if(options.isDefinedAndNonNull('pfx')
+        || options.isDefinedAndNonNull('key')
+        || options.isDefinedAndNonNull('passphrase')
+        || options.isDefinedAndNonNull('cert')
+        || options.isDefinedAndNonNull('ca')
+        || options.isDefinedAndNonNull('ciphers')
+        || options.isDefinedAndNonNull('rejectUnauthorized')
+    ) {
+        if(options.isDefinedAndNonNull('pfx')) requestOptions.pfx = options.value.pfx;
+        if(options.isDefinedAndNonNull('key')) requestOptions.key = options.value.key;
+        if(options.isDefinedAndNonNull('passphrase')) requestOptions.passphrase = options.value.passphrase;
+        if(options.isDefinedAndNonNull('cert')) requestOptions.cert = options.value.cert;
+        if(options.isDefinedAndNonNull('ca')) requestOptions.ca = options.value.ca;
+        if(options.isDefinedAndNonNull('ciphers')) requestOptions.ciphers = options.value.ciphers;
+        if(options.isDefinedAndNonNull('rejectUnauthorized')) requestOptions.rejectUnauthorized = options.value.rejectUnauthorized;
+
+        if(!agent) {
+            agent = new httpObj.Agent(requestOptions); // 无视客户端的协议
+        }
+    }
+
+    requestOptions.path = serverUrl.path || '/';
+
+    if(agent) {
+        requestOptions.agent = agent;
+    }
+
+    if(isUnixSocket) {
+        requestOptions.socketPath = serverUrl.pathname;
+    }
+
+    if(options.value.origin) {
+        if(options.value.protocolVersion < 13) requestOptions.headers['Sec-WebSocket-Origin'] = options.value.origin;
+        else requestOptions.headers.Origin = options.value.origin;
+    }
+    var self = this;
+
+    /********  天啊他终于在这段调用了**********/
+    var req = httpObj.request(requestOptions);
+    req.on('error', function onerror(error){
+        self.emit('error', error);
+        cleanupWebSocketResources.call(self, error);
+    });
+
+    req.once('response', function response(res){
+        var error;
+
+        if(!self.emit('unexcepted-response', req, res)) {
+            error = new Error('unexpected server response ('+res.statusCode + ')');
+            req.abort();
+            self.emit('error', error);
+        }
+        cleanupWebSocketResources.call(self, error);
+    });
+
+    req.once('upgrade', function upgrade(res, socket, upgradeHead){
+        if(self.readyState === WebSocket.CLOSED) {
+            // 如果发现状态已经变成关闭了，那在接受服务端连接之前就关掉。
+            self.emit('close');
+            self.removeAllListeners();
+            socket.end();
+            return;
+        }
+        var serverKey = res.headers['sec-websocket-accept']; /// 关联的服务端key？？？？
+        if(typeof serverKey === 'undefined' || serverKey !== expectedServerKey) {
+            self.emit('error', 'invalid server key');
+            self.removeAllListeners();
+            socket.end();
+            return;
+        }
+        // 校验协议相关的一些东西
+        var serverPort = res.headers['sec-websocket-protocol'];
+        var protList = (options.value.protocol || "").split(/, */);
+        var protError = null;
+
+
+        if(!options.value.protocol && serverPort) {
+            protError = 'server sent a subprotocol event though none requested';
+        } else if(options.value.protocol && !serverPort) {
+            protError = 'server sent no subprotocol event though requested';
+        } else if(serverProt && protList.indexOf(serverProt) === -1) {
+            protError = 'server responsed with an invalid protocol';
+        }
+
+        if(protError) {
+            self.emit('error', protError);
+            self.removeAllListeners();
+            socket.end();
+            return;
+        } else if(serverPort) {
+            self.protocol = serverPort;
+        }
+
+        var serverExtensions = Extensions.parse(res.headers['sec-websocket-extensions']);
+        if(perMessageDeflate && serverExtensions[PerMessageDeflate.extensionName]){
+            try {
+                perMessageDeflate.accept(serverExtensions[PerMessageDeflate.extensionName]);
+            } catch(e) {
+                self.emit('error', 'invalid extension parameter');
+                self.removeAllListeners();
+                socket.end();
+                return;
+            }
+            self.extensions[PerMessageDeflate.extensionName] = perMessageDeflate;
+        }
+        establishConnection.call(self, Receiver, Sender, socket, upgradeHead);
+
+        req.removeAllListeners();
+        req = null;
+        agent = null;
+    });
+
+    req.end();
+    this.readyState = WebSocket.CONNECTING;
 }
 
 /**
