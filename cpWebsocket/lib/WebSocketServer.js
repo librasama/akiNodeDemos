@@ -32,7 +32,7 @@ function WebSocketServer(options, callback) {
     var self = this;
 
     if(options.isDefinedAndNonNUll('port')) {
-        //日了狗了。原来是基于http协议实现的websocket!!也好 = =|||
+        //websocket是基于http协议实现的
         this._server = http.createServer(function (req, res) {
             res.writeHead(200, {'Content-type':'text-plain'});
             res.end('Not implemented');
